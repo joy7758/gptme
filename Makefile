@@ -101,7 +101,8 @@ docs: docs/conf.py docs/*.rst docs/.clean check-rst
 			git checkout origin/eval-results -- eval_results; \
 		else \
 			echo "No origin/eval-results branch; creating empty eval_results fallback"; \
-			mkdir -p eval_results; \
+			mkdir -p eval_results/bootstrap; \
+			printf "Model,Tool Format,Test,Passed,Total Duration,Generation Time,Run Time,Eval Time,Commit Hash,Log Dir,Workspace Dir\n" > eval_results/bootstrap/eval_results.csv; \
 		fi \
 	fi
 	poetry run make -C docs html SPHINXOPTS="-W --keep-going"
