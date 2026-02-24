@@ -96,9 +96,12 @@ docs: docs/conf.py docs/*.rst docs/.clean check-rst
 	if [ ! -e eval_results ]; then \
 		if [ -e eval-results/eval_results ]; then \
 			ln -s eval-results/eval_results .; \
-		else \
+		elif git ls-remote --exit-code --heads origin eval-results >/dev/null 2>&1; then \
 			git fetch origin eval-results; \
 			git checkout origin/eval-results -- eval_results; \
+		else \
+			echo "No origin/eval-results branch; creating empty eval_results fallback"; \
+			mkdir -p eval_results; \
 		fi \
 	fi
 	poetry run make -C docs html SPHINXOPTS="-W --keep-going"
