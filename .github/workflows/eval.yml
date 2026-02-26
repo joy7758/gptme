@@ -38,9 +38,18 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v6
       with:
-        ref: eval-results
         token: ${{ secrets.GITHUB_TOKEN }}
         fetch-depth: 0
+
+    - name: Ensure eval-results branch exists
+      run: |
+        if git ls-remote --exit-code --heads origin eval-results >/dev/null 2>&1; then
+          git fetch origin eval-results:eval-results
+          git checkout eval-results
+        else
+          git checkout -b eval-results
+          git push --set-upstream origin eval-results
+        fi
 
     - name: Log in to GitHub Container Registry
       uses: docker/login-action@v3
