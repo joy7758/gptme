@@ -39,6 +39,10 @@ jobs:
   optimize:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    outputs:
+      optimization_ran: ${{ steps.prereqs.outputs.should_run }}
+      selected_model: ${{ steps.prereqs.outputs.model }}
+      skip_reason: ${{ steps.prereqs.outputs.skip_reason }}
 
     steps:
       - name: Checkout repository
@@ -71,18 +75,69 @@ jobs:
           echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
           echo "OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}" >> $GITHUB_ENV
 
+      - name: Check workflow prerequisites
+        id: prereqs
+        env:
+          SELECTED_MODEL: ${{ github.event.inputs.model || 'anthropic/claude-haiku-4-5' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          set -eu
+          model="$SELECTED_MODEL"
+          provider="${model%%/*}"
+          should_run=true
+          skip_reason=""
+
+          case "$provider" in
+            anthropic)
+              if [ -z "$ANTHROPIC_API_KEY" ]; then
+                should_run=false
+                skip_reason="Missing ANTHROPIC_API_KEY for model $model"
+              fi
+              ;;
+            openai)
+              if [ -z "$OPENAI_API_KEY" ]; then
+                should_run=false
+                skip_reason="Missing OPENAI_API_KEY for model $model"
+              fi
+              ;;
+            openrouter)
+              if [ -z "$OPENROUTER_API_KEY" ]; then
+                should_run=false
+                skip_reason="Missing OPENROUTER_API_KEY for model $model"
+              fi
+              ;;
+          esac
+
+          {
+            echo "model=$model"
+            echo "should_run=$should_run"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$should_run" = true ]; then
+            echo "skip_reason=" >> "$GITHUB_OUTPUT"
+            echo "Optimization workflow enabled for $model"
+          else
+            echo "skip_reason=$skip_reason" >> "$GITHUB_OUTPUT"
+            echo "::warning::$skip_reason"
+          fi
+
       - name: Run baseline evaluation
+        if: steps.prereqs.outputs.should_run == 'true'
         run: |
           python -m gptme.eval.dspy show-prompt \
-            --model "${{ github.event.inputs.model || 'anthropic/claude-haiku-4-5' }}"
+            --model "${{ steps.prereqs.outputs.model }}"
 
       - name: Run quick test
+        if: steps.prereqs.outputs.should_run == 'true'
         run: |
           python -m gptme.eval.dspy -v quick-test \
             --num-examples 5 \
-            --model "${{ github.event.inputs.model || 'anthropic/claude-haiku-4-5' }}"
+            --model "${{ steps.prereqs.outputs.model }}"
 
       - name: Run prompt optimization
+        if: steps.prereqs.outputs.should_run == 'true'
         run: |
           EXPERIMENT_NAME="automated_optimization_$(date +%Y%m%d_%H%M%S)"
 
@@ -95,7 +150,7 @@ jobs:
 
           python -m gptme.eval.dspy -v optimize \
             --name "$EXPERIMENT_NAME" \
-            --model "${{ github.event.inputs.model || 'anthropic/claude-haiku-4-5' }}" \
+            --model "${{ steps.prereqs.outputs.model }}" \
             --max-demos "${{ github.event.inputs.max_demos || '3' }}" \
             --num-trials "${{ github.event.inputs.num_trials || '10' }}" \
             $OPTIMIZER_FLAGS \
@@ -103,21 +158,36 @@ jobs:
         continue-on-error: true
 
       - name: Analyze task coverage
+        if: steps.prereqs.outputs.should_run == 'true'
         run: |
           python -m gptme.eval.dspy analyze-coverage
         continue-on-error: true
 
       - name: Generate summary report
         if: always()
+        env:
+          SHOULD_RUN: ${{ steps.prereqs.outputs.should_run }}
+          SKIP_REASON: ${{ steps.prereqs.outputs.skip_reason }}
+          SELECTED_MODEL: ${{ steps.prereqs.outputs.model }}
+          SELECTED_OPTIMIZERS: ${{ github.event.inputs.optimizers || 'miprov2,bootstrap' }}
+          SELECTED_TRIALS: ${{ github.event.inputs.num_trials || '10' }}
         run: |
           echo "# Prompt Optimization Summary" > optimization_summary.md
           echo "**Date:** $(date)" >> optimization_summary.md
-          echo "**Model:** ${{ github.event.inputs.model || 'anthropic/claude-haiku-4-5' }}" >> optimization_summary.md
-          echo "**Optimizers:** ${{ github.event.inputs.optimizers || 'miprov2,bootstrap' }}" >> optimization_summary.md
-          echo "**Trials:** ${{ github.event.inputs.num_trials || '10' }}" >> optimization_summary.md
+          echo "**Model:** $SELECTED_MODEL" >> optimization_summary.md
+          echo "**Optimizers:** $SELECTED_OPTIMIZERS" >> optimization_summary.md
+          echo "**Trials:** $SELECTED_TRIALS" >> optimization_summary.md
+          if [ "$SHOULD_RUN" = "true" ]; then
+            echo "**Status:** completed" >> optimization_summary.md
+          else
+            echo "**Status:** skipped" >> optimization_summary.md
+            echo "**Skip reason:** $SKIP_REASON" >> optimization_summary.md
+          fi
           echo "" >> optimization_summary.md
 
-          if [ -d "./optimization_results" ]; then
+          if [ "$SHOULD_RUN" != "true" ]; then
+            echo "Optimization steps were skipped before execution." >> optimization_summary.md
+          elif [ -d "./optimization_results" ]; then
             echo "## Generated Files" >> optimization_summary.md
             find ./optimization_results -name "*.json" -o -name "*.md" -o -name "*.txt" | sort >> optimization_summary.md
             echo "" >> optimization_summary.md
@@ -143,7 +213,8 @@ jobs:
           retention-days: 30
 
       - name: Create issue with results (on failure)
-        if: failure()
+        if: failure() && github.event.repository.has_issues
+        continue-on-error: true
         uses: actions/github-script@v8
         with:
           script: |
@@ -160,7 +231,7 @@ jobs:
 
             body += '\n\nPlease investigate the workflow failure and check the logs.';
 
-            github.rest.issues.create({
+            await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: `Prompt Optimization Failed - Run ${context.runNumber}`,
@@ -171,7 +242,7 @@ jobs:
   notify-success:
     needs: optimize
     runs-on: ubuntu-latest
-    if: success()
+    if: needs.optimize.result == 'success' && needs.optimize.outputs.optimization_ran == 'true'
 
     steps:
       - name: Notify successful optimization
